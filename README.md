@@ -1,12 +1,23 @@
 # EZLineup 🏀 
+### Season‑Focused NBA Lineup Optimization Agent (MVP) 
+EZLineup is a lightweight, season‑focused AI agent that helps users build smarter NBA lineups. Instead of integrating with fantasy platforms, users manually enter their roster and optional budget. The agent retrieves real NBA season data, evaluates players using a simple scoring model, builds an optimal lineup, and explains *why* it made each decision. This MVP is designed to be fast to build, easy to demo, and beginner‑friendly. 
+--- 
+## 🚀 Features (MVP) 
+- Manual roster + budget input 
+- NBA season data retrieval 
+- Simple scoring model (minutes, usage, matchup, injuries) 
+- Budget‑aware lineup optimization 
+- Beginner‑friendly explanations 
+- Streamlit UI + FastAPI backend 
+- LangChain agent for reasoning and explanation
 
-### Season‑Focused NBA Lineup Optimization Agent (MVP)
-
-An AI-powered NBA fantasy lineup recommendation agent.
-
-## What It Does
-
-EZLineup helps fantasy basketball players build optimal lineups by automatically gathering player stats, monitoring injuries, and providing personalized recommendations. It's designed to be beginner-friendly while handling the heavy lifting of manual research.
+## 📊 How It Works
+1. User enters roster + budget
+2. Backend fetches NBA season stats
+3. Scoring model evaluates each player
+4. Optimizer builds best lineup under constraints
+5. LangChain agent generates explanations
+6. Streamlit displays lineup + reasoning
 
 ## Tech Stack
 
