@@ -41,6 +41,8 @@ EZLineup is a lightweight, season‑focused AI agent that helps users build smar
 - **LLM**: TBD
 - **Data Sources**: NBA stats APIs, injury feeds, and more
 
+---
+
 ## Project Structure
 
 ```
@@ -61,5 +63,5 @@ EZLineup/
 ```
 
 ---
-
-**Team**: Khushi Gauli, Sravya Kotamraju, Nancy Kwak, Ousman Bah
+## Team 
+Khushi Gauli, Sravya Kotamraju, Nancy Kwak, Ousman Bah
