@@ -1,0 +1,31 @@
+# FastAPI & server
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+
+# LangChain & agent
+langchain>=0.1.0
+langchain-core>=0.1.0
+langchain-openai>=0.0.5
+langchain-community>=0.0.20
+langchain-text-splitters>=0.0.1
+
+# NBA data
+nba_api>=1.4.0
+
+# Injury reports (requires Java runtime for tabula-py)
+# https://github.com/mxufc29/nbainjuries
+nbainjuries>=1.1.0
+
+# RAG / embeddings
+chromadb>=0.4.22
+sentence-transformers>=2.2.2
+
+# Utilities
+pydantic>=2.5.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Optional: web search (Tavily has free tier)
+# tavily-python>=0.3.0
