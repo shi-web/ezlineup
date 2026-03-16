@@ -372,4 +372,4 @@ with st.expander("🏥 Browse Full NBA Injury Report"):
         st.info(
             "No injury data available. This may happen during off-season, "
             "all-star break, or if the `nbainjuries` package / Java is not installed."
-        )
+        ) 
