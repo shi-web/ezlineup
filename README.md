@@ -47,7 +47,7 @@ pip install -r backend/requirements.txt -r streamlit_app/requirements.txt
 **4. Run the Streamlit app:**
 
 ```bash
-streamlit run streamlit_app/app.py
+python3 -m streamlit run streamlit_app/app.py
 ```
 
 The app opens at `http://localhost:8501`. Add players with costs, set a budget, and click **Optimize Lineup**.
