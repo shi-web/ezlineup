@@ -79,14 +79,14 @@ def _clear_roster() -> None:
     st.session_state.results = None
 
 
-def _get_injuries_cached(ttl: int = 1800) -> list[dict]:
+def _get_injuries_cached(players: list[str], ttl: int = 1800) -> list[dict]:
     """Return cached injury report, refreshing after *ttl* seconds."""
     now = time.time()
     if (
         st.session_state.injury_cache is None
         or now - st.session_state.injury_cache_ts > ttl
     ):
-        st.session_state.injury_cache = fetch_injury_report()
+        st.session_state.injury_cache = fetch_injury_report(players)
         st.session_state.injury_cache_ts = now
     return st.session_state.injury_cache
 
@@ -133,7 +133,7 @@ with st.sidebar:
     st.divider()
     st.caption(
         "EZLineup v0.1 — stats via [nba_api](https://github.com/swar/nba_api) "
-        "LeagueLeaders | injuries via [nbainjuries](https://github.com/mxufc29/nbainjuries)"
+        "LeagueLeaders | injuries via [Tavily](https://tavily.com)"
     )
 
 # ── Main – two-column layout ────────────────────────────────────────────────
@@ -326,13 +326,13 @@ if st.session_state.results is not None:
 st.divider()
 with st.expander("🏥 Browse Full NBA Injury Report"):
     st.caption(
-        "Live injury data from the NBA's official reports via "
-        "[nbainjuries](https://github.com/mxufc29/nbainjuries). "
-        "Requires the `nbainjuries` Python package and a Java runtime."
+       "Live injury data via [Tavily](https://tavily.com) web search. "
+       "Requires a valid `TAVILY_API_KEY` in your `.env` file."
     )
     if st.button("🔄  Fetch / Refresh Injuries"):
         with st.spinner("Fetching latest injury report…"):
-            st.session_state.injury_cache = fetch_injury_report()
+            roster_names = [p["name"] for p in st.session_state.roster]
+            st.session_state.injury_cache = fetch_injury_report(roster_names) if roster_names else []
             st.session_state.injury_cache_ts = time.time()
 
     cached = st.session_state.injury_cache
