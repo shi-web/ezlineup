@@ -42,7 +42,8 @@ def run_lineup_optimization(request: LineupRequest) -> LineupResponse:
     injury_infos: list[InjuryInfo] = []
 
     if request.consider_injuries:
-        raw_injuries = fetch_injury_report()
+        player_names = [e.player_name for e in resolved]
+        raw_injuries = fetch_injury_report(player_names)
         if raw_injuries:
             injury_lookup = build_injury_lookup(raw_injuries)
             roster_names = {normalize_name(e.player_name) for e in resolved}
@@ -52,8 +53,8 @@ def run_lineup_optimization(request: LineupRequest) -> LineupResponse:
                         InjuryInfo(
                             player_name=inj.get("display_name", inj["player_name"]),
                             status=inj["status"],
-                            reason=inj.get("reason", ""),
-                            team=inj.get("team", ""),
+                            reason=inj.get("reason") or  "",
+                            team=inj.get("team") or "",
                         )
                     )
 
