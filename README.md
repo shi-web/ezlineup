@@ -7,20 +7,20 @@ NBA fantasy lineup optimizer that selects the best players within a salary budge
 1. User enters a roster of players with salary costs and a budget
 2. Backend fetches season stats via the NBA API (LeagueLeaders endpoint)
 3. Each player is scored using weighted fantasy multipliers (PTS, REB, AST, STL, BLK, FG3M, TOV)
-4. Injury data is fetched via the `nbainjuries` package — injured players are excluded or penalized
+4. Injury data is fetched via the **Tavily** web search API — one search per roster player; injured players are excluded or penalized
 5. A greedy optimizer selects the highest-value players that fit within the budget
 6. Results are displayed in the Streamlit UI with scores, injury status, and an explanation
 
 ## Tech Stack
 
-- **Backend:** FastAPI, Pydantic, nba_api, nbainjuries, LangChain (tools/RAG)
+- **Backend:** FastAPI, Pydantic, nba_api, Tavily (web search), LangChain (tools/RAG)
 - **Frontend:** Streamlit
-- **Data:** NBA LeagueLeaders API, NBA official injury reports
+- **Data:** NBA LeagueLeaders API, Tavily web search for injury status
 
 ## Prerequisites
 
 - **Python 3.10+**
-- **Java Runtime (optional)** — needed only for live injury reports via the `nbainjuries` package. Check with `java -version`. The app works without it; injury data will just be unavailable.
+- **Tavily API key (optional)** — needed for live injury reports. Get a free key at [tavily.com](https://tavily.com). Set `TAVILY_API_KEY` in your environment or a `.env` file. The app works without it; injury data will just be unavailable.
 
 ## Setup & Run
 
@@ -42,6 +42,13 @@ source .venv/bin/activate
 
 ```bash
 pip install -r backend/requirements.txt -r streamlit_app/requirements.txt
+```
+
+**3b. (Optional) Set Tavily API key for injury data:**
+
+```bash
+export TAVILY_API_KEY=your_key_here
+# Or add TAVILY_API_KEY=your_key_here to a .env file in the project root
 ```
 
 **4. Run the Streamlit app:**
@@ -77,7 +84,7 @@ EZLineup/
 │   │   │   └── lineup.py             # POST /api/lineup and GET /api/injuries endpoints
 │   │   ├── services/
 │   │   │   ├── nba_service.py        # NBA data fetching (LeagueLeaders → PlayerGameLog → sample data)
-│   │   │   ├── injury_service.py     # Fetches NBA injury reports via nbainjuries package
+│   │   │   ├── injury_service.py     # Fetches injury status via Tavily web search (per player)
 │   │   │   ├── lineup_service.py     # Orchestrates: resolve IDs → fetch stats → injuries → optimize
 │   │   │   ├── optimizer.py          # Greedy budget-constrained lineup selection with injury penalties
 │   │   │   ├── scoring.py            # Projects fantasy scores from season averages
@@ -112,7 +119,7 @@ EZLineup/
 |--------|------|-------------|
 | `nba_api` LeagueLeaders | Season per-game stats for all NBA players | High (single fast call) |
 | `nba_api` PlayerGameLog | Per-player game log fallback | Low (often blocked) |
-| `nbainjuries` | Official NBA injury reports | Requires Java runtime |
+| **Tavily** | Web search for injury status (per roster player) | Requires `TAVILY_API_KEY`; free tier available |
 | Sample data | Hardcoded stats for ~20 popular players | Always available |
 
 ## Team
