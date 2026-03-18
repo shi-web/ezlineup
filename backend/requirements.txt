@@ -30,4 +30,4 @@ numpy>=1.24.0
 # Optional: web search (Tavily has free tier)
 langchain-tavily>=0.1.0
 
-google-generativeai
+google-genai>=1.0.0
