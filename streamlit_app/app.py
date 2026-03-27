@@ -24,6 +24,22 @@ if _BACKEND_DIR not in sys.path:
 from app.models.lineup import LineupRequest, RosterEntry, ScoringRules  # noqa: E402
 from app.services.injury_service import fetch_injury_report  # noqa: E402
 from app.services.lineup_service import run_lineup_optimization  # noqa: E402
+from app.services.nba_service import _SAMPLE_STATS  # noqa: E402
+
+
+@st.cache_data(show_spinner=False)
+def _load_player_names() -> list[str]:
+    """Return sorted list of active NBA player full names for autocomplete."""
+    try:
+        from nba_api.stats.static import players as static_players
+        all_players = static_players.get_players()
+        names = sorted(p["full_name"] for p in all_players if p.get("is_active"))
+        if names:
+            return names
+    except Exception:
+        pass
+    # Fallback: sample data keys, title-cased
+    return sorted(name.title() for name in _SAMPLE_STATS)
 
 # ── Gemini setup ─────────────────────────────────────────────────────────────
 from dotenv import load_dotenv  # noqa: E402
@@ -284,15 +300,18 @@ with col_main:
         with st.form("add_one", clear_on_submit=True):
             c1, c2 = st.columns([3, 1.5])
             with c1:
-                name_input = st.text_input(
-                    "Player name", placeholder="e.g. LeBron James"
+                name_input = st.selectbox(
+                    "Player name",
+                    options=_load_player_names(),
+                    index=None,
+                    placeholder="Type to search players…",
                 )
             with c2:
                 cost_input = st.number_input(
                     "Cost ($)", min_value=0, value=5000, step=500
                 )
             if st.form_submit_button("➕  Add player", use_container_width=True):
-                _add_player(name_input, float(cost_input))
+                _add_player(name_input or "", float(cost_input))
 
         st.divider()
         st.caption("**Batch add** — paste one player per line (`Name, Cost`)")
