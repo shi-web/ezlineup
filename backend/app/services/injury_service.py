@@ -16,6 +16,21 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# ── Trace log setup ───────────────────────────────────────────────────────────
+_TRACE_LOG_PATH = os.path.join(os.path.dirname(__file__), "injury_trace.log")
+
+def _trace(msg: str) -> None:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    line = f"[{ts}] {msg}"
+    logger.debug(line)
+    try:
+        with open(_TRACE_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception as e:
+        logger.warning("Could not write injury trace log: %s", e)
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+
 INJURY_PENALTY: dict[str, float] = {
     "Out": 1.0,
     "Doubtful": 0.75,
@@ -25,15 +40,46 @@ INJURY_PENALTY: dict[str, float] = {
     "Available": 0.0,
 }
 
+_MAX_SOURCE_AGE_HOURS = 36   # dated sources older than this are rejected
+_TAVILY_DAYS          = 2    # Tavily API-level recency filter (days)
 
-# Name normalization
+# ── Session cache ─────────────────────────────────────────────────────────────
+# Lives only in memory (gone when the process restarts / session ends).
+# Entries expire after _CACHE_TTL_HOURS so stale results don't persist
+# across a long-running server process.
+
+_CACHE_TTL_HOURS: float = 2.0   # how long a cached result stays valid
+
+_injury_cache: dict[str, tuple[dict, datetime]] = {}
+# key  → normalized player name
+# value → (result_dict, fetched_at datetime in UTC)
+
+
+def _cache_get(player_key: str) -> Optional[dict]:
+    """Return cached result if it exists and is not expired, else None."""
+    entry = _injury_cache.get(player_key)
+    if entry is None:
+        return None
+    result, fetched_at = entry
+    age_hours = (datetime.now(timezone.utc) - fetched_at).total_seconds() / 3600.0
+    if age_hours > _CACHE_TTL_HOURS:
+        _trace(f"  CACHE EXPIRED for '{player_key}' (age={age_hours:.1f}h > TTL={_CACHE_TTL_HOURS}h) → will re-fetch")
+        del _injury_cache[player_key]
+        return None
+    _trace(f"  CACHE HIT for '{player_key}' (age={age_hours:.1f}h) → skipping Tavily call")
+    return result
+
+
+def _cache_set(player_key: str, result: dict) -> None:
+    """Store a result in the session cache."""
+    _injury_cache[player_key] = (result, datetime.now(timezone.utc))
+    _trace(f"  CACHE SET for '{player_key}' (TTL={_CACHE_TTL_HOURS}h)")
+
+
+
+# ── Name normalization ────────────────────────────────────────────────────────
 
 def normalize_name(name: str) -> str:
-    """Normalize a player name for matching.
-
-    Handles 'Last, First' (injury-report format) and
-    'First Last' (roster-entry format).
-    """
     name = name.strip()
     if "," in name:
         parts = name.split(",", 1)
@@ -41,10 +87,9 @@ def normalize_name(name: str) -> str:
     return name.lower()
 
 
-# Datetime helpers
+# ── Datetime helpers ──────────────────────────────────────────────────────────
 
 def _parse_datetime_safe(s: Optional[str]) -> Optional[str]:
-    """Return ISO string (UTC) if parseable, else None."""
     if not s:
         return None
     s = s.strip()
@@ -86,8 +131,9 @@ _DATE_PAT = re.compile(
     re.IGNORECASE,
 )
 _URL_TS_PAT = re.compile(
-    r"Injury-Report_(\d{4}-\d{2}-\d{2})_(\d{2})_(\d{2})(AM|PM)", re.IGNORECASE
+    r"Injury-Report_(\d{4}-\d{2}-\d{2})_(\d{2})(?:_(\d{2}))?(AM|PM)", re.IGNORECASE
 )
+_URL_DATE_PAT = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 
 def _extract_date_from_text(text: str) -> Optional[str]:
@@ -111,30 +157,37 @@ def _extract_date_from_url(url: str) -> Optional[str]:
     if not url:
         return None
     m = _URL_TS_PAT.search(url)
-    if not m:
-        return None
-    hh, mm = int(m.group(2)), int(m.group(3))
-    ampm = m.group(4).upper()
-    if ampm == "PM" and hh != 12:
-        hh += 12
-    if ampm == "AM" and hh == 12:
-        hh = 0
-    try:
-        dt = datetime.fromisoformat(m.group(1)).replace(hour=hh, minute=mm, tzinfo=timezone.utc)
-        return dt.isoformat()
-    except Exception:
-        return None
+    if m:
+        hh   = int(m.group(2))
+        mins = int(m.group(3)) if m.group(3) else 0
+        ampm = m.group(4).upper()
+        if ampm == "PM" and hh != 12:
+            hh += 12
+        if ampm == "AM" and hh == 12:
+            hh = 0
+        try:
+            dt = datetime.fromisoformat(m.group(1)).replace(hour=hh, minute=mins, tzinfo=timezone.utc)
+            return dt.isoformat()
+        except Exception:
+            pass
+    m2 = _URL_DATE_PAT.search(url)
+    if m2:
+        try:
+            dt = datetime.fromisoformat(m2.group(1)).replace(hour=12, tzinfo=timezone.utc)
+            return dt.isoformat()
+        except Exception:
+            pass
+    return None
 
 
-# Status / injury extraction
-
+# ── Status / injury extraction ────────────────────────────────────────────────
 
 _STATUS_PATTERNS = [
-    ("Out", r"\b(out|ruled out|will not play|inactive)\b"),
-    ("Doubtful", r"\b(doubtful)\b"),
+    ("Out",          r"\b(out|ruled out|will not play|inactive)\b"),
+    ("Doubtful",     r"\b(doubtful)\b"),
     ("Questionable", r"\b(questionable)\b"),
-    ("GTD", r"\b(game[- ]time decision|gtd|probable)\b"),
-    ("Available", r"\b(active|available|will play|good to go)\b"),
+    ("GTD",          r"\b(game[- ]time decision|gtd|probable)\b"),
+    ("Available",    r"\b(active|available|will play|good to go)\b"),
 ]
 
 _INJURY_PAT = re.compile(
@@ -161,8 +214,7 @@ def _extract_injury_detail(text: str) -> Optional[str]:
     return text[max(0, idx - 50): min(len(text), idx + 80)].strip()
 
 
-# Source trust ranking
-
+# ── Source trust ranking ──────────────────────────────────────────────────────
 
 def _source_score(src: Optional[str]) -> int:
     if not src:
@@ -181,30 +233,36 @@ def _source_score(src: Optional[str]) -> int:
     return 1
 
 
-# Brute Tavily search tool singleton
+# ── Tavily client (direct, supports `days` parameter) ────────────────────────
+
+_tavily_client: Any = None
 
 
-_search_tool: Any = None
+def _get_tavily_client() -> Any:
+    global _tavily_client
+    if _tavily_client is None:
+        from tavily import TavilyClient  # type: ignore[import]
+        _tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
+    return _tavily_client
 
 
-def _get_search_tool() -> Any:
-    global _search_tool
-    if _search_tool is None:
-        from langchain_tavily import TavilySearch  # type: ignore[import]
-        _search_tool = TavilySearch(
-            max_results=5,
-            search_depth="basic",
-            include_answer=True,
-            include_raw=False,
-        )
-    return _search_tool
+def _tavily_search(query: str) -> dict:
+    """Search restricted to the last _TAVILY_DAYS days at the API level."""
+    client = _get_tavily_client()
+    return client.search(
+        query=query,
+        max_results=5,
+        search_depth="basic",
+        include_answer=True,
+        days=_TAVILY_DAYS,
+    )
 
 
-# Internal result processing
-
+# ── Internal result processing ────────────────────────────────────────────────
 
 def _process_player_result(player: str, tav: Any) -> dict:
-    """Translate a single Tavily search result into the standard injury dict."""
+    _trace(f"=== Processing player: {player} ===")
+
     answer_text = ""
     sources: list[dict] = []
     if isinstance(tav, dict):
@@ -213,7 +271,11 @@ def _process_player_result(player: str, tav: Any) -> dict:
     else:
         answer_text = str(tav)
 
+    _trace(f"  Answer snippet: {answer_text[:120]!r}")
+    _trace(f"  Total raw sources returned: {len(sources)}")
+
     if not sources and not answer_text:
+        _trace("  DECISION: No data at all → Available")
         return {
             "player_name": normalize_name(player),
             "display_name": player,
@@ -223,79 +285,145 @@ def _process_player_result(player: str, tav: Any) -> dict:
             "game_date": "unknown",
         }
 
+    # ── Build candidate list ──────────────────────────────────────────────
     candidates = []
-    for r in sources[:5]:
-        title = r.get("title", "")
-        url = r.get("url", "")
+    for i, r in enumerate(sources[:5]):
+        title     = r.get("title", "")
+        url       = r.get("url", "")
         published = r.get("published_date") or r.get("date") or None
-        content = r.get("content") or ""
+        content   = r.get("content") or ""
 
-        blob = " ".join([title, content, answer_text]).strip()
+        blob   = " ".join([title, content, answer_text]).strip()
         status = _extract_status(blob) or _extract_status(content) or _extract_status(title)
         injury_detail = _extract_injury_detail(blob)
 
-        iso = _parse_datetime_safe(published) or _extract_date_from_text(blob) or _extract_date_from_url(url)
+        iso    = _parse_datetime_safe(published) or _extract_date_from_text(blob) or _extract_date_from_url(url)
+        hours  = _hours_since(iso)
+        trust  = _source_score(url)
+
+        _trace(
+            f"  Source[{i}]: trust={trust} | age={'%.1f' % hours if hours is not None else 'UNDATED'}h "
+            f"| status={status} | url={url[:80]} | title={title[:60]!r}"
+        )
+
         candidates.append({
-            "status": status,
+            "status":        status,
             "injury_detail": injury_detail,
-            "source": url or title or None,
-            "last_updated": iso or "unknown",
+            "source":        url or title or None,
+            "last_updated":  iso or "unknown",
+            "hours_old":     hours,
+            "trust_score":   trust,
         })
 
-    statuses = [c["status"] for c in candidates if c["status"]]
-    if not statuses:
+    # ── Freshness filter ──────────────────────────────────────────────────
+    fresh = [c for c in candidates if c["hours_old"] is not None and c["hours_old"] <= _MAX_SOURCE_AGE_HOURS]
+
+    for c in candidates:
+        if c["hours_old"] is not None and c["hours_old"] > _MAX_SOURCE_AGE_HOURS:
+            _trace(
+                f"  REJECTED stale: age={c['hours_old']:.1f}h | "
+                f"status={c['status']} | url={str(c['source'])[:80]}"
+            )
+
+    # Undated sources: only high-trust (>=3) survive, and "Out" is
+    # downgraded to "Questionable" because we can't verify recency.
+    undated_safe = []
+    for c in candidates:
+        if c["hours_old"] is not None:
+            continue  # already handled above
+        if c["trust_score"] < 3:
+            _trace(
+                f"  REJECTED undated low-trust: trust={c['trust_score']} | "
+                f"status={c['status']} | url={str(c['source'])[:80]}"
+            )
+            continue
+        if c["status"] == "Out":
+            _trace(
+                f"  UNDATED high-trust source says Out → downgraded to Questionable "
+                f"(cannot confirm recency) | url={str(c['source'])[:80]}"
+            )
+            c = {**c, "status": "Questionable"}
+        undated_safe.append(c)
+
+    _trace(
+        f"  After filters: {len(fresh)} fresh, {len(undated_safe)} undated-safe, "
+        f"threshold={_MAX_SOURCE_AGE_HOURS}h"
+    )
+
+    active_candidates = fresh if fresh else undated_safe
+
+    if not active_candidates:
+        _trace(
+            f"  DECISION: No usable sources after filtering → Available "
+            f"(no confirmed recent injury)"
+        )
         return {
             "player_name": normalize_name(player),
             "display_name": player,
-            "status": "Questionable",  # conservative when status is unclear
-            "reason": None,
+            "status": "Available",
+            "reason": f"No injury reports within last {_MAX_SOURCE_AGE_HOURS}h — assumed healthy.",
             "team": "",
             "game_date": "unknown",
         }
 
-    # Pick the most conservative status; flag conflicts in reason
-    priority = {"Out": 4, "Doubtful": 3, "Questionable": 2, "GTD": 1, "Available": 0}
-
-    #unique_statuses = sorted(set(statuses))
-    #conflict_note = ""
-    #if len(unique_statuses) > 1:
-    #    conflict_note = f"Conflicting reports ({', '.join(unique_statuses)}). Using most conservative. "
-    #final_status = sorted(unique_statuses, key=lambda s: priority.get(s, 2), reverse=True)[0]
-    fresh_candidates = [
-    c for c in candidates
-    if c["status"] and (_hours_since(c["last_updated"] if c["last_updated"] != "unknown" else None) or 999) < 48]
-
-    active_candidates = fresh_candidates if fresh_candidates else candidates
     statuses = [c["status"] for c in active_candidates if c["status"]]
+    if not statuses:
+        _trace("  DECISION: Usable sources found but no status parsed → Questionable")
+        return {
+            "player_name": normalize_name(player),
+            "display_name": player,
+            "status": "Questionable",
+            "reason": "Status mentioned but could not be parsed.",
+            "team": "",
+            "game_date": "unknown",
+        }
 
+    # ── Majority vote ─────────────────────────────────────────────────────
+    out_count       = statuses.count("Out")
+    total           = len(statuses)
     unique_statuses = sorted(set(statuses))
-    conflict_note = ""
 
-    # Only use most conservative if MAJORITY of sources agree it's bad
-    out_count = statuses.count("Out")
-    total = len(statuses)
+    _trace(f"  Status votes: {statuses}")
+
     if out_count / total >= 0.5:
         final_status = "Out"
+        _trace(f"  Vote: ≥50% Out ({out_count}/{total}) → Out")
     elif len(unique_statuses) > 1:
-        conflict_note = f"Conflicting reports ({', '.join(unique_statuses)}). "
-    # Use majority vote instead of most conservative
         final_status = max(set(statuses), key=statuses.count)
+        _trace(f"  Vote: conflict {unique_statuses} → majority={final_status}")
     else:
         final_status = unique_statuses[0]
+        _trace(f"  Vote: unanimous → {final_status}")
 
-    # Select the highest-trust source that agrees with the final status
-    same_status = [c for c in candidates if c["status"] == final_status]
+    conflict_note = (
+        f"Conflicting reports ({', '.join(unique_statuses)}). "
+        if len(unique_statuses) > 1 else ""
+    )
+
+    # ── Pick best source ──────────────────────────────────────────────────
+    same_status = [c for c in active_candidates if c["status"] == final_status]
+    pool = same_status or active_candidates
     chosen = sorted(
-        same_status or candidates,
-        key=lambda c: (_source_score(c["source"]), c["last_updated"] != "unknown"),
+        pool,
+        key=lambda c: (
+            c["trust_score"],
+            -(c["hours_old"] if c["hours_old"] is not None else 9999),
+        ),
         reverse=True,
     )[0]
 
-    last_updated = chosen.get("last_updated", "unknown")
-    hours = _hours_since(last_updated if last_updated != "unknown" else None)
-    stale_note = f"Source is ~{int(hours)}h old (>48h). " if hours and hours > 48 else ""
+    _trace(
+        f"  Chosen source: trust={chosen['trust_score']} | "
+        f"age={'%.1f' % chosen['hours_old'] if chosen['hours_old'] is not None else 'UNDATED'}h | "
+        f"url={str(chosen['source'])[:80]}"
+    )
+    _trace(f"  FINAL DECISION for {player}: {final_status}")
+    _trace("")
 
-    reason = (stale_note + conflict_note + (chosen.get("injury_detail") or "")).strip() or None
+    last_updated = chosen.get("last_updated", "unknown")
+    hours        = chosen.get("hours_old")
+    stale_note   = f"Source ~{int(hours)}h old. " if hours and hours > _MAX_SOURCE_AGE_HOURS else ""
+    reason       = (stale_note + conflict_note + (chosen.get("injury_detail") or "")).strip() or None
 
     return {
         "player_name": normalize_name(player),
@@ -307,22 +435,10 @@ def _process_player_result(player: str, tav: Any) -> dict:
     }
 
 
-# Public API
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def fetch_injury_report(players: list[str] | None = None) -> list[dict]:
-    """Fetch injury status for the given players via Tavily web search.
-
-    Returns a list of dicts with keys:
-        player_name  – normalized 'first last' (lowercase)
-        display_name – original player name as supplied
-        status       – Out / Doubtful / Questionable / GTD / Available
-        reason       – injury description or conflict note (may be None)
-        team         – team name (empty; Tavily does not provide reliably)
-        game_date    – ISO timestamp of the source article, or 'unknown'
-
-    Returns an empty list if *players* is None/empty, the Tavily package is
-    not installed, or TAVILY_API_KEY is not set.
-    """
+    """Fetch injury status for the given players via Tavily web search."""
     if not players:
         return []
 
@@ -330,39 +446,49 @@ def fetch_injury_report(players: list[str] | None = None) -> list[dict]:
         logger.warning("TAVILY_API_KEY not set – injury data unavailable.")
         return []
 
+    _trace(f"fetch_injury_report called for {len(players)} player(s): {players}")
+    _trace(f"Freshness threshold: {_MAX_SOURCE_AGE_HOURS}h | Tavily days filter: {_TAVILY_DAYS}")
+    _trace("")
+
     try:
-        search_tool = _get_search_tool()
+        _get_tavily_client()
     except ImportError:
-        logger.info(
-            "langchain_tavily not installed - injury data unavailable. "
-            "Install with: pip install langchain-tavily"
-        )
+        logger.info("tavily package not installed – run: pip install tavily-python")
         return []
     except Exception as e:
-        logger.warning("Failed to initialize Tavily search tool: %s", e)
+        logger.warning("Failed to initialize Tavily client: %s", e)
         return []
 
     results: list[dict] = []
     for player in players:
-        query = (
-            f"{player} injury status questionable doubtful out "
-            "game-time decision NBA latest"
-        )
+        player_key = normalize_name(player)
+
+        # ── Check session cache first ─────────────────────────────────────
+        cached = _cache_get(player_key)
+        if cached is not None:
+            results.append(cached)
+            continue
+
+        # ── Not cached (or expired) → fetch from Tavily ───────────────────
+        query = f"{player} NBA injury status today questionable doubtful out game-time decision"
+        _trace(f"Tavily query (days={_TAVILY_DAYS}): {query!r}")
         try:
-            tav = search_tool.invoke({"query": query})
+            tav = _tavily_search(query)
         except Exception as e:
             logger.warning("Tavily search failed for %s: %s", player, e)
+            _trace(f"  ERROR: Tavily search failed → {e}")
             continue
-        results.append(_process_player_result(player, tav))
+
+        result = _process_player_result(player, tav)
+        _cache_set(player_key, result)
+        results.append(result)
 
     return results
 
 
 def build_injury_lookup(injuries: list[dict]) -> dict[str, dict]:
-    """Build lookup dict: normalized player name → injury record."""
     return {r["player_name"]: r for r in injuries}
 
 
 def get_injury_penalty(status: str) -> float:
-    """Score reduction factor: 0.0 = no penalty, 1.0 = full exclusion."""
     return INJURY_PENALTY.get(status, 0.0)
