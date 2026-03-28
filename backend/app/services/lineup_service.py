@@ -12,8 +12,10 @@ from app.services.injury_service import (
 )
 from app.services.nba_service import get_player_id, get_players_season_stats
 from app.services.optimizer import optimize_lineup
+from langsmith import traceable
 
 
+@traceable(name="lineup-optimization")
 def run_lineup_optimization(request: LineupRequest) -> LineupResponse:
     """Resolve roster → fetch stats → fetch injuries → optimize → return response."""
 
