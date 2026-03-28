@@ -24,22 +24,80 @@ if _BACKEND_DIR not in sys.path:
 from app.models.lineup import LineupRequest, RosterEntry, ScoringRules  # noqa: E402
 from app.services.injury_service import fetch_injury_report  # noqa: E402
 from app.services.lineup_service import run_lineup_optimization  # noqa: E402
-from app.services.nba_service import _SAMPLE_STATS  # noqa: E402
+
+# ── Position slot definitions (label + beginner-friendly tooltip) ─────────────
+POSITION_SLOTS: dict[str, dict] = {
+    "PG": {
+        "label": "Point Guard",
+        "tooltip": "Usually the smallest player on the court. Handles the ball a lot and passes to teammates. Earns fantasy points mainly through assists and steals.",
+    },
+    "SG": {
+        "label": "Shooting Guard",
+        "tooltip": "A guard who focuses more on scoring. Good for racking up points and 3-pointers in fantasy.",
+    },
+    "SF": {
+        "label": "Small Forward",
+        "tooltip": "A mid-sized player who can score, rebound, and defend. Does a little of everything — great for fantasy.",
+    },
+    "PF": {
+        "label": "Power Forward",
+        "tooltip": "A bigger forward who plays near the basket. Earns fantasy points through rebounds and blocks.",
+    },
+    "C": {
+        "label": "Center",
+        "tooltip": "The tallest player, stays near the basket. Best for rebounds and blocks in fantasy.",
+    },
+}
+
+# Maps raw NBA API position strings → specific fantasy slot
+_API_POS_TO_SLOT: dict[str, str] = {
+    "G": "PG", "PG": "PG", "SG": "SG",
+    "G-F": "SG", "F-G": "SG",
+    "F": "SF", "SF": "SF", "PF": "PF",
+    "F-C": "PF", "C-F": "PF",
+    "C": "C",
+}
 
 
-@st.cache_data(show_spinner=False)
-def _load_player_names() -> list[str]:
-    """Return sorted list of active NBA player full names for autocomplete."""
+def _api_pos_to_slot(raw: str) -> str:
+    return _API_POS_TO_SLOT.get(raw.upper().strip(), raw or "?")
+
+
+@st.cache_data(show_spinner=False, ttl=3600 * 6)
+def _load_player_data() -> dict[str, dict]:
+    """Return {full_name: {id, position}} for all active NBA players.
+
+    Tries PlayerIndex (positions + IDs) → static list (IDs only) → sample fallback.
+    """
     try:
-        from nba_api.stats.static import players as static_players
-        all_players = static_players.get_players()
-        names = sorted(p["full_name"] for p in all_players if p.get("is_active"))
-        if names:
-            return names
+        from nba_api.stats.endpoints import playerindex
+        pi = playerindex.PlayerIndex(league_id="00", timeout=30)
+        df = pi.get_data_frames()[0]
+        result: dict[str, dict] = {}
+        for _, row in df.iterrows():
+            if row.get("ROSTER_STATUS") != 1:
+                continue
+            name = f"{row['PLAYER_FIRST_NAME']} {row['PLAYER_LAST_NAME']}".strip()
+            result[name] = {
+                "id": int(row["PERSON_ID"]),
+                "position": _api_pos_to_slot(str(row.get("POSITION", ""))),
+            }
+        if result:
+            return result
     except Exception:
         pass
-    # Fallback: sample data keys, title-cased
-    return sorted(name.title() for name in _SAMPLE_STATS)
+    # Fallback: static list has IDs but no positions
+    try:
+        from nba_api.stats.static import players as static_players
+        return {
+            p["full_name"]: {"id": p["id"], "position": "?"}
+            for p in static_players.get_active_players()
+        }
+    except Exception:
+        pass
+    # Last resort: hardcoded sample data names, no IDs
+    from app.services.nba_service import _SAMPLE_STATS
+    return {name.title(): {"id": None, "position": "?"} for name in _SAMPLE_STATS}
 
 # ── Gemini setup ─────────────────────────────────────────────────────────────
 from dotenv import load_dotenv  # noqa: E402
@@ -167,11 +225,19 @@ if "injury_cache_ts" not in st.session_state:
     st.session_state.injury_cache_ts = 0.0
 if "chat_history" not in st.session_state:
     st.session_state.chat_history: list[dict] = []
+if "add_form_key" not in st.session_state:
+    st.session_state.add_form_key = 0
 
 
-def _add_player(name: str, cost: float) -> None:
-    if name.strip():
-        st.session_state.roster.append({"name": name.strip(), "cost": cost})
+def _add_player(name: str, cost: float, position: str = "?", player_id: int | None = None) -> None:
+    name = name.strip()
+    if name:
+        st.session_state.roster.append({
+            "name": name,
+            "cost": cost,
+            "position": position,
+            "player_id": player_id,
+        })
 
 
 def _remove_player(idx: int) -> None:
@@ -297,21 +363,64 @@ with col_main:
     with col_form:
         st.subheader("Add Players")
 
-        with st.form("add_one", clear_on_submit=True):
-            c1, c2 = st.columns([3, 1.5])
-            with c1:
-                name_input = st.selectbox(
-                    "Player name",
-                    options=_load_player_names(),
-                    index=None,
-                    placeholder="Type to search players…",
+        _player_data = _load_player_data()
+        _existing = {p["name"].lower() for p in st.session_state.roster}
+        _player_names = sorted(k for k in _player_data if k.lower() not in _existing)
+
+        _name_input = st.selectbox(
+            "Player name",
+            options=_player_names,
+            format_func=lambda n: f"{n}  ·  {_player_data[n]['position']}",
+            index=None,
+            placeholder="Type to search…",
+            key=f"player_select_{st.session_state.add_form_key}",
+        )
+
+        # Live player card — updates immediately when a name is selected
+        _pos_override = "?"
+        _selected_id = None
+        if _name_input:
+            _pdata = _player_data[_name_input]
+            _selected_id = _pdata.get("id")
+            card_c1, card_c2 = st.columns([1, 3])
+            with card_c1:
+                if _selected_id:
+                    st.markdown(
+                        f'<img src="https://cdn.nba.com/headshots/nba/latest/260x190/{_selected_id}.png" '
+                        f'width="75" style="border-radius:8px;" '
+                        f'onerror="this.style.display=\'none\'">',
+                        unsafe_allow_html=True,
+                    )
+            with card_c2:
+                st.markdown(f"**{_name_input}**")
+                _slot_options = list(POSITION_SLOTS.keys())
+                _default_idx = _slot_options.index(_pdata["position"]) if _pdata["position"] in _slot_options else 0
+                _pos_override = st.selectbox(
+                    "Position",
+                    options=_slot_options,
+                    index=_default_idx,
+                    help="Auto-detected from NBA API. Override if incorrect.",
+                    key=f"pos_override_{st.session_state.add_form_key}",
                 )
-            with c2:
-                cost_input = st.number_input(
-                    "Cost ($)", min_value=0, value=5000, step=500
-                )
-            if st.form_submit_button("➕  Add player", use_container_width=True):
-                _add_player(name_input or "", float(cost_input))
+
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            cost_input = st.number_input(
+                "Cost ($)", min_value=0, value=5000, step=500,
+                key=f"cost_{st.session_state.add_form_key}",
+            )
+        with c2:
+            st.markdown("<div style='padding-top:28px'>", unsafe_allow_html=True)
+            _add_clicked = st.button("➕ Add", use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        if _add_clicked:
+            if _name_input:
+                _add_player(_name_input, float(cost_input), _pos_override, _selected_id)
+                st.session_state.add_form_key += 1
+                st.rerun()
+            else:
+                st.warning("Select a player first.")
 
         st.divider()
         st.caption("**Batch add** — paste one player per line (`Name, Cost`)")
@@ -331,7 +440,11 @@ with col_main:
                 pname = parts[0].strip()
                 pcost = float(parts[1].strip()) if len(parts) > 1 else 0.0
                 if pname:
-                    _add_player(pname, pcost)
+                    # Try to resolve position from loaded data (case-insensitive)
+                    _match = next((k for k in _player_data if k.lower() == pname.lower()), None)
+                    _batch_pos = _player_data[_match]["position"] if _match else "?"
+                    _batch_id = _player_data[_match]["id"] if _match else None
+                    _add_player(_match or pname, pcost, _batch_pos, _batch_id)
                     added += 1
             if added:
                 st.rerun()
@@ -343,18 +456,20 @@ with col_main:
         if not st.session_state.roster:
             st.info("Add players using the form on the left to get started.")
         else:
-            header_cols = st.columns([0.5, 3, 1.5, 0.8])
+            header_cols = st.columns([0.5, 2.5, 1.2, 1.5, 0.8])
             header_cols[0].markdown("**#**")
             header_cols[1].markdown("**Player**")
-            header_cols[2].markdown("**Cost**")
-            header_cols[3].markdown("**Remove**")
+            header_cols[2].markdown("**Position**")
+            header_cols[3].markdown("**Cost**")
+            header_cols[4].markdown("**Remove**")
 
             for idx, player in enumerate(st.session_state.roster):
-                rc = st.columns([0.5, 3, 1.5, 0.8])
+                rc = st.columns([0.5, 2.5, 1.2, 1.5, 0.8])
                 rc[0].write(idx + 1)
                 rc[1].write(player["name"])
-                rc[2].write(f"${player['cost']:,.0f}")
-                if rc[3].button("✕", key=f"rm_{idx}"):
+                rc[2].write(player.get("position", "?"))
+                rc[3].write(f"${player['cost']:,.0f}")
+                if rc[4].button("✕", key=f"rm_{idx}"):
                     _remove_player(idx)
                     st.rerun()
 
@@ -368,6 +483,42 @@ with col_main:
                 _clear_roster()
                 st.rerun()
 
+    # ── 5-slot lineup board ───────────────────────────────────────────────────
+    if st.session_state.roster:
+        st.divider()
+        st.subheader("Lineup Board")
+        st.caption("Players organized by position. Hover the position labels for details.")
+        slot_cols = st.columns(5, gap="small")
+        for col, (pos, info) in zip(slot_cols, POSITION_SLOTS.items()):
+            with col:
+                st.markdown(f"**{pos}**", help=info["tooltip"])
+                st.caption(info["label"])
+                slot_players = [p for p in st.session_state.roster if p.get("position") == pos]
+                if slot_players:
+                    for sp in slot_players:
+                        pid = sp.get("player_id")
+                        if pid:
+                            st.markdown(
+                                f'<img src="https://cdn.nba.com/headshots/nba/latest/260x190/{pid}.png" '
+                                f'width="60" style="border-radius:6px;" '
+                                f'onerror="this.style.display=\'none\'">',
+                                unsafe_allow_html=True,
+                            )
+                        st.markdown(
+                            f"<span style='font-size:0.8rem'>{sp['name']}</span><br>"
+                            f"<span style='font-size:0.75rem; color:#a8b2d1'>${sp['cost']:,.0f}</span>",
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown("<hr style='margin:4px 0; border-color:#0f3460'>", unsafe_allow_html=True)
+                else:
+                    st.markdown(
+                        "<div style='border:2px dashed #0f3460; border-radius:8px; "
+                        "height:80px; display:flex; align-items:center; "
+                        "justify-content:center; color:#a8b2d1; font-size:0.8rem;'>"
+                        "Empty</div>",
+                        unsafe_allow_html=True,
+                    )
+
     # ── Optimize button ───────────────────────────────────────────────────────
     st.divider()
 
@@ -380,7 +531,7 @@ with col_main:
             with st.spinner("Resolving players, fetching stats & injuries…"):
                 try:
                     roster_entries = [
-                        RosterEntry(player_name=p["name"], cost=p["cost"])
+                        RosterEntry(player_name=p["name"], cost=p["cost"], player_id=p.get("player_id"), position=p.get("position", "?"))
                         for p in st.session_state.roster
                     ]
 
@@ -420,6 +571,7 @@ with col_main:
         m4.metric("Budget Remaining", f"${budget - result.total_cost:,.0f}")
 
         if result.lineup:
+            _roster_pos_lookup = {p["name"].lower(): p.get("position", "?") for p in st.session_state.roster}
             rows = []
             for p in result.lineup:
                 status_icon = ""
@@ -434,6 +586,7 @@ with col_main:
                 rows.append(
                     {
                         "Player": p.player_name,
+                        "Position": _roster_pos_lookup.get(p.player_name.lower(), "?"),
                         "Cost": p.cost,
                         "Proj. Score": round(p.projected_score, 1),
                         "Injury": f"{status_icon} {p.injury_status}" if p.injury_status else "✅ Healthy",
@@ -468,7 +621,7 @@ with col_main:
                     inj_rows.append(
                         {
                             "Player": inj.player_name,
-                            "Team": inj.team,
+                            "Position": _roster_pos_lookup.get(inj.player_name.lower(), "?"),
                             "Status": f"{icon} {inj.status}",
                             "Reason": inj.reason,
                         }
@@ -510,7 +663,6 @@ with col_main:
                     [
                         {
                             "Player": r.get("display_name", r["player_name"]),
-                            "Team": r.get("team", ""),
                             "Status": r["status"],
                             "Reason": r.get("reason", ""),
                         }

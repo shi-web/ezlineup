@@ -23,7 +23,7 @@ def run_lineup_optimization(request: LineupRequest) -> LineupResponse:
         pid = entry.player_id if entry.player_id is not None else get_player_id(entry.player_name)
         if pid is None:
             continue
-        resolved.append(RosterEntry(player_name=entry.player_name, cost=entry.cost, player_id=pid))
+        resolved.append(RosterEntry(player_name=entry.player_name, cost=entry.cost, player_id=pid, position=entry.position))
 
     if not resolved:
         return LineupResponse(
@@ -90,7 +90,7 @@ def run_lineup_optimization(request: LineupRequest) -> LineupResponse:
             )
     explanation_parts.append(
         f"Total projected fantasy score: {total_score:.1f}. "
-        "Players ranked by value (projected score per salary dollar)."
+        "One player selected per position slot to maximize total score within budget."
     )
 
     return LineupResponse(
