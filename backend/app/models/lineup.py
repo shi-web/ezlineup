@@ -9,6 +9,7 @@ class RosterEntry(BaseModel):
     player_name: str = Field(..., description="Player name (e.g. 'LeBron James')")
     cost: float = Field(default=0.0, ge=0, description="Fantasy cost/salary for this player")
     player_id: int | None = Field(default=None, description="Optional NBA player ID for exact match")
+    position: str = Field(default="?", description="Fantasy position slot (PG, SG, SF, PF, C)")
 
 
 class ScoringRules(BaseModel):
