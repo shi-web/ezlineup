@@ -148,4 +148,4 @@ EZLineup/
 
 ## Team
 
-Khushi Gauli, Sravya Kotamraju, Nancy Kwak, Ousman Bah
+Khushi Gauli, Sravya Kotamraju, Nancy Nakyung Kwak, Ousman Bah
